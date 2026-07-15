@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from typing import Dict, Any, Optional
 
 try:
@@ -15,8 +16,12 @@ from app.tools import (
     calculate_workload_memory,
     analyze_exertion_and_drift,
     get_periodized_workout_options,
-    calibrate_biometric_zones
+    calibrate_biometric_zones,
+    WorkloadMemoryInput,
+    WorkoutOptionsInput,
+    BiometricZonesInput
 )
+from app.memory import memory_bank, history_compactor
 
 logger = logging.getLogger("breakaway_ai.multi_agent")
 
@@ -103,3 +108,65 @@ class HumanInTheLoopHook:
 
 guardrail_inspector = GuardrailAgent()
 hitl_confirmation_hook = HumanInTheLoopHook()
+
+# 5. Fully Integrated Main Execution Pipeline
+async def execute_orchestrated_agent_pipeline(
+    user_prompt: str,
+    session_id: str = "default_session",
+    user_approved: Optional[bool] = None
+) -> Dict[str, Any]:
+    """
+    Main integrated multi-agent execution pipeline. Orchestrates model routing, diagnostic calls,
+    reasoning coach generation, safety guardrail inspection, HITL confirmation, and persistent DB storage.
+    """
+    logger.info(f"Pipeline Executing for session '{session_id}' | Model Routing: gemini-2.5-flash -> gemini-2.5-pro")
+    
+    # Step 1: Load user profile from persistent SQLite DB
+    profile = await memory_bank.load_user_profile_async(session_id)
+    
+    # Step 2: Route to PhysiologyDiagnosticsAgent (gemini-2.5-flash) for biometric calibration & workload
+    diag_res = calibrate_biometric_zones(BiometricZonesInput(
+        ftp_watts=profile["ftp_watts"],
+        max_hr_bpm=profile["max_hr_bpm"],
+        weight_kg=profile["weight_kg"]
+    ))
+    
+    # Step 3: Route to PeriodizationCoachAgent (gemini-2.5-pro) for 3-option workout generation
+    recs_res = get_periodized_workout_options(WorkoutOptionsInput(
+        user_ftp=profile["ftp_watts"],
+        user_max_hr=profile["max_hr_bpm"],
+        user_weight_kg=profile["weight_kg"]
+    ))
+    
+    current_acwr = recs_res.current_acwr or 1.0
+    primary_workout = recs_res.recommendations[0]["primary"] if recs_res.recommendations else {}
+
+    # Step 4: Run Safety Guardrail Inspection
+    guardrail_result = guardrail_inspector.inspect_and_enforce_safety(current_acwr, primary_workout)
+    active_workout = guardrail_result["overridden_workout"] if guardrail_result["guardrail_triggered"] else primary_workout
+
+    # Step 5: Execute Human-in-the-Loop Confirmation Hook
+    hitl_result = hitl_confirmation_hook.request_execution_confirmation(active_workout, user_approved=user_approved)
+
+    # Step 6: Persist state asynchronously to SQLite DB
+    pipeline_state = {
+        "user_profile": profile,
+        "current_acwr": current_acwr,
+        "active_workout": active_workout,
+        "hitl_status": hitl_result["status"]
+    }
+    await memory_bank.save_user_profile_async(session_id, pipeline_state)
+
+    return {
+        "status": "success",
+        "session_id": session_id,
+        "model_routing": {
+            "diagnostics_agent": "gemini-2.5-flash",
+            "coach_agent": "gemini-2.5-pro"
+        },
+        "acwr": current_acwr,
+        "guardrail": guardrail_result,
+        "hitl_confirmation": hitl_result,
+        "biometric_zones": diag_res.power_zones,
+        "workout_options": recs_res.recommendations
+    }

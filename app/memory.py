@@ -1,41 +1,67 @@
 import asyncio
 import json
 import logging
+import os
+import sqlite3
 from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger("breakaway_ai.memory")
 
 class AsyncPersistentMemoryBank:
     """
-    Asynchronous Persistent Memory Store for user biometrics, historical EWMA state, and long-term coaching preferences.
-    Executes async non-blocking memory operations for expensive database calls.
+    Asynchronous Persistent Memory Store using SQLite persistent database for user biometrics,
+    historical EWMA state, and long-term coaching preferences.
+    Executes non-blocking async database operations.
     """
-    def __init__(self):
-        self._memory_store: Dict[str, Any] = {
-            "user_biometrics": {
-                "ftp_watts": 261,
-                "max_hr_bpm": 205,
-                "resting_hr_bpm": 47,
-                "weight_kg": 63.0
-            },
-            "recent_ewma_state": {
-                "acute_load": 60.99,
-                "chronic_load": 61.51,
-                "acwr": 0.99
-            }
-        }
+    def __init__(self, db_path: str = "breakaway_memory.db"):
+        self.db_path = db_path
+        self._init_db()
+
+    def _init_db(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS session_memory (
+                    session_id TEXT PRIMARY KEY,
+                    profile_json TEXT NOT NULL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.commit()
 
     async def save_user_profile_async(self, session_id: str, profile_data: Dict[str, Any]) -> bool:
-        """Async memory operation to persist user biometrics and training preferences."""
-        await asyncio.sleep(0.01)  # Non-blocking async simulation
-        self._memory_store[session_id] = profile_data
-        logger.info(f"Async Memory Bank: Persisted profile for session {session_id}")
+        """Async memory operation storing persistent profile data in SQLite DB."""
+        def _save():
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("""
+                    INSERT INTO session_memory (session_id, profile_json)
+                    VALUES (?, ?)
+                    ON CONFLICT(session_id) DO UPDATE SET
+                        profile_json = excluded.profile_json,
+                        updated_at = CURRENT_TIMESTAMP
+                """, (session_id, json.dumps(profile_data)))
+                conn.commit()
+
+        await asyncio.to_thread(_save)
+        logger.info(f"Async Persistent Database: Saved profile to SQLite DB for session {session_id}")
         return True
 
     async def load_user_profile_async(self, session_id: str) -> Dict[str, Any]:
-        """Async memory operation to retrieve persistent user profile."""
-        await asyncio.sleep(0.01)
-        return self._memory_store.get(session_id, self._memory_store["user_biometrics"])
+        """Async memory operation retrieving persistent profile from SQLite DB."""
+        def _load():
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT profile_json FROM session_memory WHERE session_id = ?", (session_id,))
+                row = cursor.fetchone()
+                if row:
+                    return json.loads(row[0])
+                return {
+                    "ftp_watts": 261,
+                    "max_hr_bpm": 205,
+                    "resting_hr_bpm": 47,
+                    "weight_kg": 63.0
+                }
+
+        return await asyncio.to_thread(_load)
 
 class HistoryCompactor:
     """
@@ -53,10 +79,7 @@ class HistoryCompactor:
         if len(messages) <= max_turns:
             return messages
 
-        # Preserve system instruction / first turn
         system_turn = messages[0] if messages and messages[0].get("role") == "system" else None
-        
-        # Summarize older turns
         older_turns = messages[1:-max_turns] if system_turn else messages[:-max_turns]
         recent_turns = messages[-max_turns:]
 
