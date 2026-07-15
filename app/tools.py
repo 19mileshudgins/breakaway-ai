@@ -1,8 +1,7 @@
-import json
 import logging
-import numpy as np
-import pandas as pd
+import io
 from typing import Dict, Any, List, Optional
+from pydantic import BaseModel, Field
 
 try:
     from google.adk.tools import tool
@@ -13,185 +12,187 @@ except ImportError:
 from app.parser import parse_activities_csv
 from app.physiology import (
     compute_ewma_workloads, classify_acwr_zone, calculate_power_zones,
-    calculate_hr_zones, calculate_running_paces, generate_latest_workout_analysis,
-    generate_recent_training_summary, UserProfile
+    calculate_hr_zones, calculate_running_paces, UserProfile
 )
 from app.optimizer import generate_recommendations
 
 logger = logging.getLogger("breakaway_ai.tools")
 
+# --- Explicit Pydantic Schemas for Tool Inputs & Outputs ---
+
+class WorkloadMemoryInput(BaseModel):
+    csv_data_str: str = Field(description="Raw CSV content containing historical activity dates and loads")
+
+class WorkloadMemoryOutput(BaseModel):
+    status: str = Field(description="Execution status ('success' or 'error')")
+    date: Optional[str] = Field(default=None, description="Final timeline date")
+    acute_load: Optional[float] = Field(default=None, description="7-day Acute Load (EWMA Fatigue)")
+    chronic_load: Optional[float] = Field(default=None, description="28-day Chronic Load (EWMA Fitness)")
+    acwr: Optional[float] = Field(default=None, description="Acute:Chronic Workload Ratio")
+    acwr_zone: Optional[str] = Field(default=None, description="Workload zone classification")
+    error_message: Optional[str] = Field(default=None, description="Guided recovery message if error occurs")
+
+class ExertionAnalysisInput(BaseModel):
+    avg_power_watts: float = Field(description="Average power output in Watts")
+    avg_hr_bpm: float = Field(description="Average heart rate in Beats Per Minute")
+    distance_miles: float = Field(description="Distance covered in miles")
+    duration_mins: float = Field(description="Duration in minutes")
+    ftp_watts: int = Field(default=261, description="FTP baseline in Watts")
+    max_hr_bpm: int = Field(default=205, description="Max Heart Rate baseline in BPM")
+
+class ExertionAnalysisOutput(BaseModel):
+    status: str = Field(description="Execution status")
+    speed_mph: Optional[float] = Field(default=None, description="Calculated speed in mph")
+    pct_ftp: Optional[float] = Field(default=None, description="Power output as percentage of FTP")
+    pct_max_hr: Optional[float] = Field(default=None, description="Heart rate as percentage of Max HR")
+    category: Optional[str] = Field(default=None, description="Periodized workout category")
+    cardiovascular_drift_detected: Optional[bool] = Field(default=None, description="Cardiovascular drift status")
+    coaching_takeaway: Optional[str] = Field(default=None, description="Physiological coaching takeaway")
+    error_message: Optional[str] = Field(default=None, description="Error explanation")
+
+class WorkoutOptionsInput(BaseModel):
+    horizon_days: int = Field(default=1, description="1 for single day, 7 for full week recommendations")
+    user_ftp: int = Field(default=261, description="FTP baseline in Watts")
+    user_max_hr: int = Field(default=205, description="Max HR baseline in BPM")
+    user_weight_kg: float = Field(default=63.0, description="Weight in kg")
+
+class WorkoutOptionsOutput(BaseModel):
+    status: str = Field(description="Execution status")
+    current_acwr: Optional[float] = Field(default=None, description="Current ACWR")
+    acwr_zone: Optional[str] = Field(default=None, description="Current ACWR zone")
+    recommendations: Optional[List[Dict[str, Any]]] = Field(default=None, description="Periodized workout recommendations")
+    error_message: Optional[str] = Field(default=None, description="Error explanation")
+
+class BiometricZonesInput(BaseModel):
+    ftp_watts: int = Field(default=261, description="FTP in Watts")
+    max_hr_bpm: int = Field(default=205, description="Max HR in BPM")
+    weight_kg: float = Field(default=63.0, description="Weight in kg")
+
+class BiometricZonesOutput(BaseModel):
+    status: str = Field(description="Execution status")
+    power_zones: Optional[Dict[str, str]] = Field(default=None, description="Calibrated cycling power zones")
+    hr_zones: Optional[Dict[str, str]] = Field(default=None, description="Calibrated heart rate zones")
+    error_message: Optional[str] = Field(default=None, description="Error explanation")
+
+# --- Explicitly Typed ADK Tools ---
+
 @tool
-def calculate_workload_memory(csv_data_str: str) -> str:
+def calculate_workload_memory(params: WorkloadMemoryInput) -> WorkloadMemoryOutput:
     """
     Parses historical activity CSV content and calculates rolling 7-day Acute Load (EWMA lambda=7),
     28-day Chronic Load (EWMA lambda=28), and Acute:Chronic Workload Ratio (ACWR).
-
-    Args:
-        csv_data_str (str): Raw CSV content containing activity Date, Load, Type, Distance, Moving Time, Power, and HR.
-
-    Returns:
-        str: JSON string containing final date, acute load, chronic load, acwr ratio, and zone classification.
     """
     try:
-        if not csv_data_str or not isinstance(csv_data_str, str):
-            return json.dumps({
-                "status": "error",
-                "error_code": "INVALID_INPUT",
-                "message": "CSV data content must be a non-empty string. Please provide valid CSV formatting."
-            })
+        if not params.csv_data_str or not isinstance(params.csv_data_str, str):
+            return WorkloadMemoryOutput(
+                status="error",
+                error_message="CSV data content must be a non-empty string. Please provide valid CSV formatting."
+            )
             
-        import io
-        df_parsed = parse_activities_csv(io.StringIO(csv_data_str))
+        df_parsed = parse_activities_csv(io.StringIO(params.csv_data_str))
         df_ewma = compute_ewma_workloads(df_parsed)
         
         last_row = df_ewma.iloc[-1]
         acwr_val = float(last_row["ACWR"])
         status_info = classify_acwr_zone(acwr_val)
         
-        return json.dumps({
-            "status": "success",
-            "date": str(last_row["Date"]),
-            "acute_load": round(float(last_row["Acute_Load"]), 2),
-            "chronic_load": round(float(last_row["Chronic_Load"]), 2),
-            "acwr": round(acwr_val, 2),
-            "acwr_zone": status_info["zone"],
-            "safety_status": status_info["status"]
-        })
+        return WorkloadMemoryOutput(
+            status="success",
+            date=str(last_row["Date"]),
+            acute_load=round(float(last_row["Acute_Load"]), 2),
+            chronic_load=round(float(last_row["Chronic_Load"]), 2),
+            acwr=round(acwr_val, 2),
+            acwr_zone=status_info["zone"]
+        )
     except Exception as e:
         logger.error(f"Error in calculate_workload_memory tool: {e}")
-        return json.dumps({
-            "status": "error",
-            "error_code": "PROCESSING_FAILED",
-            "message": f"Failed to calculate workload memory: {str(e)}. Please check CSV schema continuity."
-        })
+        return WorkloadMemoryOutput(
+            status="error",
+            error_message=f"Failed to calculate workload memory: {str(e)}"
+        )
 
 @tool
-def analyze_exertion_and_drift(
-    avg_power_watts: float,
-    avg_hr_bpm: float,
-    distance_miles: float,
-    duration_mins: float,
-    ftp_watts: int = 261,
-    max_hr_bpm: int = 205
-) -> str:
+def analyze_exertion_and_drift(params: ExertionAnalysisInput) -> ExertionAnalysisOutput:
     """
-    Analyzes historical workout exertion, calculating speed, % FTP, % Max HR, and detecting cardiovascular drift phenomena.
-
-    Args:
-        avg_power_watts (float): Average power output in Watts.
-        avg_hr_bpm (float): Average heart rate in Beats Per Minute.
-        distance_miles (float): Distance covered in miles.
-        duration_mins (float): Duration in minutes.
-        ftp_watts (int): User Functional Threshold Power baseline in Watts. Default is 261W.
-        max_hr_bpm (int): User Maximum Heart Rate baseline in BPM. Default is 205 BPM.
-
-    Returns:
-        str: JSON string containing calculated metrics, cardiovascular drift detection, and physiological takeaways.
+    Analyzes historical workout exertion, calculating speed, % FTP, % Max HR, and detecting cardiovascular drift.
     """
     try:
-        if duration_mins <= 0 or distance_miles <= 0:
-            return json.dumps({
-                "status": "error",
-                "error_code": "INVALID_PARAMETERS",
-                "message": "Duration and distance must be greater than 0."
-            })
+        if params.duration_mins <= 0 or params.distance_miles <= 0:
+            return ExertionAnalysisOutput(
+                status="error",
+                error_message="Duration and distance must be greater than 0."
+            )
 
-        speed_mph = distance_miles / (duration_mins / 60.0)
-        pct_ftp = (avg_power_watts / ftp_watts) * 100.0 if ftp_watts > 0 else 0.0
-        pct_max_hr = (avg_hr_bpm / max_hr_bpm) * 100.0 if max_hr_bpm > 0 else 0.0
+        speed_mph = params.distance_miles / (params.duration_mins / 60.0)
+        pct_ftp = (params.avg_power_watts / params.ftp_watts) * 100.0 if params.ftp_watts > 0 else 0.0
+        pct_max_hr = (params.avg_hr_bpm / params.max_hr_bpm) * 100.0 if params.max_hr_bpm > 0 else 0.0
         
         has_cardio_drift = (pct_ftp <= 78.0 and pct_max_hr >= 82.0)
-        
         category = "Cardiovascular Drift" if has_cardio_drift else ("Lactate Threshold" if pct_max_hr >= 85.0 else "Zone 2 Endurance")
         
-        return json.dumps({
-            "status": "success",
-            "speed_mph": round(speed_mph, 1),
-            "pct_ftp": round(pct_ftp, 1),
-            "pct_max_hr": round(pct_max_hr, 1),
-            "category": category,
-            "cardiovascular_drift_detected": has_cardio_drift,
-            "coaching_takeaway": (
+        return ExertionAnalysisOutput(
+            status="success",
+            speed_mph=round(speed_mph, 1),
+            pct_ftp=round(pct_ftp, 1),
+            pct_max_hr=round(pct_max_hr, 1),
+            category=category,
+            cardiovascular_drift_detected=has_cardio_drift,
+            coaching_takeaway=(
                 "Cardiovascular drift detected: Heart rate reached Zone 4 Threshold territory despite Zone 2 power. "
                 "Indicates accumulated fatigue, dehydration, or heat stress requiring active recovery."
                 if has_cardio_drift else "Heart rate response aligned well with target power output."
             )
-        })
+        )
     except Exception as e:
         logger.error(f"Error in analyze_exertion_and_drift tool: {e}")
-        return json.dumps({
-            "status": "error",
-            "error_code": "CALCULATION_ERROR",
-            "message": f"Exertion calculation error: {str(e)}"
-        })
+        return ExertionAnalysisOutput(
+            status="error",
+            error_message=f"Exertion calculation error: {str(e)}"
+        )
 
 @tool
-def get_periodized_workout_options(
-    horizon_days: int = 1,
-    user_ftp: int = 261,
-    user_max_hr: int = 205,
-    user_weight_kg: float = 63.0
-) -> str:
+def get_periodized_workout_options(params: WorkoutOptionsInput) -> WorkoutOptionsOutput:
     """
     Generates structured periodized workout recommendations with 3 alternative workout modalities per day.
-
-    Args:
-        horizon_days (int): 1 for single day, 7 for full week recommendations.
-        user_ftp (int): FTP in Watts. Default 261W.
-        user_max_hr (int): Max HR in BPM. Default 205 BPM.
-        user_weight_kg (float): Weight in kg. Default 63.0 kg.
-
-    Returns:
-        str: JSON string containing current ACWR state and 3 periodized workout options per date.
     """
     try:
         sample_path = "/usr/local/google/home/mileshudgins/sandbox/breakaway-ai/sample_workouts.csv"
         df_parsed = parse_activities_csv(sample_path)
         df_ewma = compute_ewma_workloads(df_parsed)
         
-        profile = UserProfile(ftp_watts=user_ftp, max_hr_bpm=user_max_hr, weight_kg=user_weight_kg)
-        recs = generate_recommendations(df_ewma, horizon_days=horizon_days, user_profile=profile)
+        profile = UserProfile(ftp_watts=params.user_ftp, max_hr_bpm=params.user_max_hr, weight_kg=params.user_weight_kg)
+        recs = generate_recommendations(df_ewma, horizon_days=params.horizon_days, user_profile=profile)
         
-        return json.dumps({
-            "status": "success",
-            "current_acwr": recs["current_state"]["acwr"],
-            "acwr_zone": recs["current_state"]["acwr_status"]["zone"],
-            "recommendations": recs["recommendations"]
-        })
+        return WorkoutOptionsOutput(
+            status="success",
+            current_acwr=recs["current_state"]["acwr"],
+            acwr_zone=recs["current_state"]["acwr_status"]["zone"],
+            recommendations=recs["recommendations"]
+        )
     except Exception as e:
         logger.error(f"Error in get_periodized_workout_options tool: {e}")
-        return json.dumps({
-            "status": "error",
-            "error_code": "PERIODIZATION_ERROR",
-            "message": f"Failed to generate periodized options: {str(e)}"
-        })
+        return WorkoutOptionsOutput(
+            status="error",
+            error_message=f"Failed to generate periodized options: {str(e)}"
+        )
 
 @tool
-def calibrate_biometric_zones(ftp_watts: int = 261, max_hr_bpm: int = 205, weight_kg: float = 63.0) -> str:
+def calibrate_biometric_zones(params: BiometricZonesInput) -> BiometricZonesOutput:
     """
     Calibrates cycling power zones (W & W/kg) and heart rate zones (BPM) based on user biometrics.
-
-    Args:
-        ftp_watts (int): Functional Threshold Power in Watts.
-        max_hr_bpm (int): Maximum Heart Rate in BPM.
-        weight_kg (float): Weight in kilograms.
-
-    Returns:
-        str: JSON string with calibrated power and heart rate zones.
     """
     try:
-        power_zones = calculate_power_zones(ftp_watts, weight_kg)
-        hr_zones = calculate_hr_zones(max_hr_bpm)
+        power_zones = calculate_power_zones(params.ftp_watts, params.weight_kg)
+        hr_zones = calculate_hr_zones(params.max_hr_bpm)
         
-        return json.dumps({
-            "status": "success",
-            "power_zones": power_zones,
-            "hr_zones": hr_zones
-        })
+        return BiometricZonesOutput(
+            status="success",
+            power_zones=power_zones,
+            hr_zones=hr_zones
+        )
     except Exception as e:
         logger.error(f"Error in calibrate_biometric_zones tool: {e}")
-        return json.dumps({
-            "status": "error",
-            "error_code": "ZONE_CALIBRATION_FAILED",
-            "message": str(e)
-        })
+        return BiometricZonesOutput(
+            status="error",
+            error_message=str(e)
+        )

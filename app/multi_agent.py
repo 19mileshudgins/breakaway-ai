@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 try:
     from google.adk.agent import Agent
@@ -26,7 +26,7 @@ physiology_agent = Agent(
     model="gemini-2.5-flash",
     instruction=(
         "You are a specialized exercise physiologist. Your sole focus is calculating Acute/Chronic EWMA workloads, "
-        "detecting cardiovascular drift, and calibrating biometric zones. Always invoke calculate_workload_memory and analyze_exertion_and_drift."
+        "detecting cardiovascular drift, and calibrating biometric zones."
     ),
     tools=[calculate_workload_memory, analyze_exertion_and_drift, calibrate_biometric_zones]
 )
@@ -37,7 +37,7 @@ coach_agent = Agent(
     model="gemini-2.5-pro",
     instruction=(
         "You are a master endurance coach. Formulate structured multi-sport periodization plans across 5 categories: "
-        "Active Recovery, Zone 2 Endurance, Sweet Spot, Lactate Threshold, and Anaerobic Sprint. Provide 3 alternative options per day."
+        "Active Recovery, Zone 2 Endurance, Sweet Spot, Lactate Threshold, and Anaerobic Sprint."
     ),
     tools=[get_periodized_workout_options]
 )
@@ -69,4 +69,37 @@ class GuardrailAgent:
             "workout": proposed_workout
         }
 
+# 4. Human-in-the-Loop (HITL) Execution Confirmation Hook
+class HumanInTheLoopHook:
+    """
+    Human-in-the-Loop (HITL) execution confirmation hook requiring explicit user approval
+    before finalizing alternative workout replacements or high-volume plan alterations.
+    """
+    def request_execution_confirmation(
+        self,
+        workout_plan: Dict[str, Any],
+        user_approved: Optional[bool] = None
+    ) -> Dict[str, Any]:
+        if user_approved is None:
+            logger.info(f"HITL Hook: Intercepted plan change '{workout_plan.get('title')}'. Awaiting user confirmation.")
+            return {
+                "status": "AWAITING_HUMAN_CONFIRMATION",
+                "message": f"Proposed Workout Plan: '{workout_plan.get('title')}' ({workout_plan.get('category')}). Please confirm to replace active plan.",
+                "requires_confirmation": True
+            }
+        elif user_approved is True:
+            logger.info(f"HITL Hook: User approved plan change '{workout_plan.get('title')}'. Committing execution.")
+            return {
+                "status": "APPROVED_AND_EXECUTED",
+                "message": f"Workout plan '{workout_plan.get('title')}' confirmed and updated.",
+                "confirmed_plan": workout_plan
+            }
+        else:
+            logger.info(f"HITL Hook: User rejected plan change.")
+            return {
+                "status": "REJECTED_BY_USER",
+                "message": "Plan alteration rejected by user. Preserving existing scheduled workout."
+            }
+
 guardrail_inspector = GuardrailAgent()
+hitl_confirmation_hook = HumanInTheLoopHook()
