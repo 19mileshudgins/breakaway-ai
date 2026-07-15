@@ -6,15 +6,15 @@
 
 ---
 
-## 📌 Architecture & Evaluation Rubric Alignment (95/95 Points)
+## 📌 Problem & Objective
 
-| Evaluator Criterion | Score Target | Implementation Details |
-| :--- | :---: | :--- |
-| **Tool & Interface Design** | **20 / 20** | • **Explicit `@adk.tool` Functions** (`app/tools.py`): Defined `calculate_workload_memory`, `analyze_exertion_and_drift`, `get_periodized_workout_options`, and `calibrate_biometric_zones` with full Python type annotations, JSON Schema docstrings, and guided error handling.<br>• **Streamlit & FastAPI UIs** (`app.py`, `app/fast_api_app.py`): Sleek dark glassmorphism dashboard and ADK agent serving endpoints. |
-| **Context & Memory** | **20 / 20** | • **ADK Root Agent** (`app/agent.py`): Root `Agent(name="breakaway_ai", model="gemini-2.5-flash")` with system instructions, multi-turn session memory, and tool routing.<br>• **EWMA Workload Memory**: Tracks 7-day Acute Fatigue ($\lambda_a=7$) and 28-day Chronic Fitness ($\lambda_c=28$) memory.<br>• **Physiological Profile Memory**: FTP (261W), Max HR (205 BPM), Resting HR (47 BPM), and 60-day weekday habits. |
-| **Orchestration & Logic** | **20 / 20** | • **Multi-Agent Architecture** (`app/multi_agent.py`): Router Agent, `PhysiologyDiagnosticsAgent` (`gemini-2.5-flash`), and `PeriodizationCoachAgent` (`gemini-2.5-pro`).<br>• **Agentic Guardrails**: `GuardrailAgent` intercepts and blocks high-intensity workout recommendations when ACWR $\ge$ 1.50 (Danger Overtraining Zone), enforcing mandatory active recovery. |
-| **Observability & Tracing** | **15 / 15** | • **Structured JSON Logging** (`app/observability.py`): `AgentJsonFormatter` logs explicit agent intent vs execution outcome telemetry.<br>• **PII Redaction**: Automatic regex redaction scrubbing user emails, names, and identifiers.<br>• **OpenTelemetry Tracing**: Distributed Cloud Trace setup (`setup_opentelemetry_tracing`). |
-| **Infrastructure & CI/CD** | **20 / 20** | • **Golden Dataset Evaluation Harness** (`eval/eval_dataset.json` & `eval/eval_config.json`): ADK regression testing suite.<br>• **Terraform IaC** (`infra/terraform/main.tf`, `variables.tf`, `outputs.tf`): Full GCP Cloud Run IaC infrastructure definition.<br>• **GitHub Actions CI/CD** (`.github/workflows/deploy.yml`): Automated build & test pipeline. |
+Traditional fitness dashboards track basic Acute:Chronic Workload Ratios (ACWR), but fail to provide structured periodization or meaningful physiological context. A raw load number like `60 TSS` offers no insight into exertion relative to a user's Functional Threshold Power (FTP) or Heart Rate limits, nor does it account for training specificity (Aerobic Base vs. Sweet Spot vs. VO2 Max Intervals).
+
+**BreakawayAI** solves this by delivering an intelligent, adaptive multi-sport periodization assistant that:
+1. **Computes EWMA Workload Memory**: Tracks 7-day Acute Fatigue ($\lambda_a=7$) and 28-day Chronic Fitness ($\lambda_c=28$) memory from activity data.
+2. **Performs Deep Exertion & Cardiovascular Drift Analysis**: Calculates real-world speed (mph), pace (min/mi), power output (% FTP, W/kg), and heart rate intensity (% Max HR), detecting key phenomena like cardiovascular drift (elevated HR relative to Zone 2 power).
+3. **Prescribes Periodized Workout Modalities**: Generates structured daily recommendations across 5 training categories (*Active Recovery, Zone 2 Endurance, Sweet Spot, Lactate Threshold, Anaerobic/Sprint*) with 2 alternative modality options per day.
+4. **Interactive Trajectory Projection**: Dynamically updates projected fatigue/fitness curves on a Plotly timeline whenever a user selects an alternative workout.
 
 ---
 
