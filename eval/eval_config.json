@@ -1,0 +1,12 @@
+{
+  "eval_dataset": "eval/eval_dataset.json",
+  "agent_module": "app.agent:root_agent",
+  "metrics": [
+    "tool_call_match",
+    "response_quality",
+    "safety_compliance",
+    "latency"
+  ],
+  "judge_model": "gemini-2.5-pro",
+  "output_dir": "eval/results"
+}

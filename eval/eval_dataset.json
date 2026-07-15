@@ -1,0 +1,48 @@
+[
+  {
+    "eval_id": "eval-001",
+    "name": "EWMA Workload Memory Calculation",
+    "description": "Tests agent ability to parse activity data and compute Acute/Chronic EWMA workloads",
+    "prompt": "Calculate my current ACWR and workload memory from my training dataset.",
+    "expected_tool_call": "calculate_workload_memory",
+    "expected_outcomes": [
+        "acute_load",
+        "chronic_load",
+        "acwr"
+    ]
+  },
+  {
+    "eval_id": "eval-002",
+    "name": "Cardiovascular Drift Detection",
+    "description": "Tests agent detection of heart rate drift into Zone 4 Threshold during Zone 2 power efforts",
+    "prompt": "Analyze my latest ride where average power was 197W (75% FTP) but heart rate reached 176 BPM (86% Max HR).",
+    "expected_tool_call": "analyze_exertion_and_drift",
+    "expected_outcomes": [
+        "Cardiovascular Drift",
+        "cardiovascular_drift_detected"
+    ]
+  },
+  {
+    "eval_id": "eval-003",
+    "name": "Periodized 3-Option Workout Recommendations",
+    "description": "Tests generation of 3 periodized workout options across 5 training categories",
+    "prompt": "Give me my periodized workout recommendations for tomorrow with alternative modalities.",
+    "expected_tool_call": "get_periodized_workout_options",
+    "expected_outcomes": [
+        "Option A",
+        "Option B",
+        "Option C"
+    ]
+  },
+  {
+    "eval_id": "eval-004",
+    "name": "Biometric Zone Calibration",
+    "description": "Tests cycling power zone and heart rate zone calibration",
+    "prompt": "Calibrate my cycling power zones for a 261W FTP and 205 Max HR.",
+    "expected_tool_call": "calibrate_biometric_zones",
+    "expected_outcomes": [
+        "Zone 2 (Endurance)",
+        "Zone 4 (Threshold)"
+    ]
+  }
+]
