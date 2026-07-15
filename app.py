@@ -5,15 +5,17 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import os
 import io
+import asyncio
 
-from parser import parse_activities_csv
-from physiology import (
+from app.parser import parse_activities_csv
+from app.physiology import (
     compute_ewma_workloads, classify_acwr_zone, calculate_power_zones,
     calculate_hr_zones, calculate_running_paces, parse_time_to_seconds,
     generate_recent_training_summary, generate_latest_workout_analysis, UserProfile
 )
-from habits import analyze_habits
-from optimizer import generate_recommendations
+from app.habits import analyze_habits
+from app.optimizer import generate_recommendations
+from app.multi_agent import execute_orchestrated_agent_pipeline
 
 # Page Configuration
 st.set_page_config(
@@ -52,7 +54,6 @@ st.markdown("""
         letter-spacing: -0.5px;
     }
 
-    /* Date Subheader Styling with Inline Greyed-out Zones Prompt */
     .date-header {
         font-family: 'Outfit', sans-serif;
         font-size: 24px !important;
@@ -65,15 +66,6 @@ st.markdown("""
         gap: 16px;
     }
 
-    .zones-prompt {
-        font-family: 'Inter', sans-serif;
-        font-size: 16px !important;
-        font-weight: 600 !important;
-        color: #9CA3AF !important;
-        cursor: pointer;
-    }
-
-    /* Prominent Glassmorphism Summary Box */
     .summary-box {
         background: rgba(245, 158, 11, 0.06);
         backdrop-filter: blur(16px);
@@ -120,7 +112,6 @@ st.markdown("""
         border: none !important;
     }
 
-    /* Prominent Latest Workout Expander Header (26px Bold Subtitle) */
     div[data-testid="stExpander"] {
         background: rgba(16, 185, 129, 0.05) !important;
         border: none !important;
@@ -145,7 +136,6 @@ st.markdown("""
         color: #A7F3D0 !important;
     }
 
-    /* Sleek Option Radio Pills */
     div[data-testid="stRadio"] label {
         font-size: 18px !important;
         font-weight: 600 !important;
@@ -163,7 +153,6 @@ st.markdown("""
         color: #FDE047 !important;
     }
 
-    /* Periodized Workout Cards */
     .workout-card {
         background: rgba(255, 255, 255, 0.03);
         backdrop-filter: blur(16px);
@@ -175,10 +164,6 @@ st.markdown("""
         margin-bottom: 24px;
         transition: all 0.3s ease;
     }
-
-    .workout-card:hover {
-        box-shadow: 0 8px 28px rgba(0,0,0,0.45), 0 0 18px rgba(245, 158, 11, 0.2);
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -188,7 +173,7 @@ def load_data(file_source, max_hr=205, resting_hr=47):
     return df_ewma
 
 def main():
-    # --- SIDEBAR: Settings & Controls (Hidden by default in expandable sidebar) ---
+    # --- SIDEBAR: Settings & Controls ---
     with st.sidebar:
         st.subheader("⚙️ Settings & Controls")
 
@@ -205,25 +190,26 @@ def main():
             st.warning("Please upload a CSV file to begin.")
             return
 
-        with st.expander("👤 Physiological Profile & Calibrations", expanded=False):
-            st.write("**Biometrics**")
-            weight_unit = st.radio("Weight Unit", ["kg", "lbs"], horizontal=True)
-            weight_val = st.number_input("Weight", value=63.0 if weight_unit=="kg" else 138.9)
+        with st.expander("👤 Physiological Profile & Calibrations", expanded=True):
+            st.write("**Biometrics (Live Calibrations)**")
+            weight_unit = st.radio("Weight Unit", ["kg", "lbs"], horizontal=True, key="weight_unit_select")
+            default_wt = 63.0 if weight_unit == "kg" else 138.9
+            weight_val = st.number_input("Weight", value=default_wt, key="weight_input")
             weight_kg = weight_val if weight_unit == "kg" else weight_val * 0.453592
 
-            ftp_watts = st.number_input("Functional Threshold Power (FTP Watts)", value=261)
-            max_hr = st.number_input("Max Heart Rate (BPM)", value=205)
-            resting_hr = st.number_input("Resting Heart Rate (BPM)", value=47)
+            ftp_watts = st.number_input("Functional Threshold Power (FTP Watts)", value=261, key="ftp_input")
+            max_hr = st.number_input("Max Heart Rate (BPM)", value=205, key="max_hr_input")
+            resting_hr = st.number_input("Resting Heart Rate (BPM)", value=47, key="resting_hr_input")
 
             st.write("**Best Effort Running PRs (HH:MM:SS or MM:SS)**")
             c_pr1, c_pr2 = st.columns(2)
-            pr_5k_str = c_pr1.text_input("5K PR", value="")
-            pr_10k_str = c_pr2.text_input("10K PR", value="")
-            pr_half_str = c_pr1.text_input("Half Marathon PR", value="")
-            pr_mar_str = c_pr2.text_input("Marathon PR", value="")
+            pr_5k_str = c_pr1.text_input("5K PR", value="", key="pr_5k")
+            pr_10k_str = c_pr2.text_input("10K PR", value="", key="pr_10k")
+            pr_half_str = c_pr1.text_input("Half Marathon PR", value="", key="pr_half")
+            pr_mar_str = c_pr2.text_input("Marathon PR", value="", key="pr_marathon")
 
             user_profile = UserProfile(
-                weight_kg=weight_kg,
+                weight_kg=float(weight_kg),
                 ftp_watts=int(ftp_watts),
                 max_hr_bpm=int(max_hr),
                 resting_hr_bpm=int(resting_hr),
@@ -234,7 +220,7 @@ def main():
             )
 
         st.subheader("🎯 Recommendation Horizon")
-        horizon = st.radio("Select Horizon", ["Plan the Day", "Plan the Week"], index=0)
+        horizon = st.radio("Select Horizon", ["Plan the Day", "Plan the Week"], index=0, key="horizon_select")
         horizon_days = 1 if horizon == "Plan the Day" else 7
 
     # Load Data Ephemerally
@@ -269,7 +255,7 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    # 2. Latest Workout Breakdown (Prominent 26px Bold Subtitle Expander directly BELOW Summary)
+    # 2. Latest Workout Breakdown
     color_cfg = latest_workout["color_cfg"]
     badge_html = f'<span style="background: {color_cfg["bg"]}; color: {color_cfg["text"]}; border: 1px solid {color_cfg["border"]}; padding: 4px 14px; border-radius: 20px; font-weight: 700; font-size: 15px; margin-left: 10px;">{latest_workout["category"]}</span>'
     
@@ -285,7 +271,7 @@ def main():
         </div>
         """, unsafe_allow_html=True)
 
-    # Key Metrics Row with Practical Point-of-Reference Tooltips
+    # Key Metrics Row
     m1, m2, m3 = st.columns(3)
 
     m1.metric(
@@ -316,6 +302,35 @@ def main():
         help=acwr_tooltip
     )
 
+    # --- CLEAN RENAMED CHAT CONSOLE ---
+    st.subheader("💬 Ask anything!")
+    st.caption("Ask breakaway AI anything related to your training history or goals")
+
+    user_query = st.text_input(
+        "Enter your question:",
+        placeholder="e.g. What was the highest paced run I've done in the past month?",
+        key="adk_agent_query",
+        label_visibility="collapsed"
+    )
+
+    if user_query:
+        with st.spinner("Analyzing your training history..."):
+            pipeline_result = asyncio.run(execute_orchestrated_agent_pipeline(
+                user_prompt=user_query,
+                session_id="streamlit_user_session",
+                user_approved=True
+            ))
+
+        # Render with explicit HTML styling and bold text tags
+        st.markdown(f"""
+        <div style="background: rgba(16, 185, 129, 0.08); padding: 20px 24px; border-radius: 16px; border-left: 6px solid #10B981; margin-top: 14px; margin-bottom: 28px;">
+            <div style="font-size: 20px; font-weight: 700; color: #6EE7B7; margin-bottom: 8px;">💬 BreakawayAI Coach:</div>
+            <div style="font-size: 18px; color: #F3F4F6; line-height: 1.8;">
+                {pipeline_result['coaching_response']}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
     # --- "WHAT'S NEXT?" WORKOUT RECOMMENDATIONS WITH ALTERNATIVE MODALITIES ---
     st.subheader("💡 What's Next?")
     st.caption("Select your preferred modality or training focus below for each day. Selecting an alternative option instantly updates your workout prescription and projected timeline.")
@@ -343,7 +358,7 @@ def main():
         st.markdown(f"""
         <div class="date-header">
             <span>🗓️ {rec['date']} ({rec['weekday']})</span>
-            <span class="zones-prompt">— (What are my zones? See below)</span>
+            <span style="font-size: 16px; font-weight: 600; color: #9CA3AF;">— (What are my zones? See below)</span>
         </div>
         """, unsafe_allow_html=True)
 
@@ -394,7 +409,7 @@ def main():
         </div>
         """, unsafe_allow_html=True)
 
-    # --- "MY ZONES" EXPANDER (RELOCATED TO APPEAR BELOW ALTERNATIVE WORKOUT OPTIONS) ---
+    # --- "MY ZONES" EXPANDER ---
     with st.expander("📊 My Zones", expanded=False):
         col_pz, col_hrz, col_rp = st.columns(3)
         
@@ -437,7 +452,6 @@ def main():
 
     fig = go.Figure()
 
-    # Clean Shaded Bands (No Overlapping Text Keys)
     fig.add_hrect(y0=0.8, y1=1.3, fillcolor="#10B981", opacity=0.12, line_width=0)
     fig.add_hrect(y0=1.5, y1=3.0, fillcolor="#F43F5E", opacity=0.12, line_width=0)
 
@@ -479,7 +493,6 @@ def main():
     last_hist_date = df["Date"].iloc[-1]
     fig.add_vline(x=str(last_hist_date), line_width=2, line_dash="dot", line_color="white", annotation_text="Today")
 
-    # Zoom Window: Last 7 Days of Historical Data to End of Projections
     x_min_date = (pd.to_datetime(df["Date"].iloc[-1]) - timedelta(days=7)).strftime("%Y-%m-%d")
     x_max_date = str(proj_dates[-1])
 

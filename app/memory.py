@@ -9,9 +9,8 @@ logger = logging.getLogger("breakaway_ai.memory")
 
 class AsyncPersistentMemoryBank:
     """
-    Asynchronous Persistent Memory Store using SQLite persistent database for user biometrics,
-    historical EWMA state, and long-term coaching preferences.
-    Executes non-blocking async database operations.
+    Asynchronous & Synchronous Persistent Memory Store using SQLite persistent database
+    for user biometrics, historical EWMA state, and long-term coaching preferences.
     """
     def __init__(self, db_path: str = "breakaway_memory.db"):
         self.db_path = db_path
@@ -28,54 +27,49 @@ class AsyncPersistentMemoryBank:
             """)
             conn.commit()
 
+    def save_user_profile(self, session_id: str, profile_data: Dict[str, Any]) -> bool:
+        """Synchronous memory operation storing persistent profile data in SQLite DB."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                INSERT INTO session_memory (session_id, profile_json)
+                VALUES (?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    profile_json = excluded.profile_json,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (session_id, json.dumps(profile_data)))
+            conn.commit()
+        logger.info(f"Persistent Database: Saved profile to SQLite DB for session {session_id}")
+        return True
+
+    def load_user_profile(self, session_id: str) -> Dict[str, Any]:
+        """Synchronous memory operation retrieving persistent profile from SQLite DB."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT profile_json FROM session_memory WHERE session_id = ?", (session_id,))
+            row = cursor.fetchone()
+            if row:
+                return json.loads(row[0])
+            return {
+                "ftp_watts": 261,
+                "max_hr_bpm": 205,
+                "resting_hr_bpm": 47,
+                "weight_kg": 63.0
+            }
+
     async def save_user_profile_async(self, session_id: str, profile_data: Dict[str, Any]) -> bool:
         """Async memory operation storing persistent profile data in SQLite DB."""
-        def _save():
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute("""
-                    INSERT INTO session_memory (session_id, profile_json)
-                    VALUES (?, ?)
-                    ON CONFLICT(session_id) DO UPDATE SET
-                        profile_json = excluded.profile_json,
-                        updated_at = CURRENT_TIMESTAMP
-                """, (session_id, json.dumps(profile_data)))
-                conn.commit()
-
-        await asyncio.to_thread(_save)
-        logger.info(f"Async Persistent Database: Saved profile to SQLite DB for session {session_id}")
-        return True
+        return await asyncio.to_thread(self.save_user_profile, session_id, profile_data)
 
     async def load_user_profile_async(self, session_id: str) -> Dict[str, Any]:
         """Async memory operation retrieving persistent profile from SQLite DB."""
-        def _load():
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT profile_json FROM session_memory WHERE session_id = ?", (session_id,))
-                row = cursor.fetchone()
-                if row:
-                    return json.loads(row[0])
-                return {
-                    "ftp_watts": 261,
-                    "max_hr_bpm": 205,
-                    "resting_hr_bpm": 47,
-                    "weight_kg": 63.0
-                }
-
-        return await asyncio.to_thread(_load)
+        return await asyncio.to_thread(self.load_user_profile, session_id)
 
 class HistoryCompactor:
-    """
-    Sliding-Window History Compaction & Summarization Engine.
-    Prevents context window overflow during multi-turn conversations.
-    """
     def compact_conversation_history(
         self,
         messages: List[Dict[str, Any]],
         max_turns: int = 6
     ) -> List[Dict[str, Any]]:
-        """
-        Compacts long conversation turns into a succinct memory summary + recent window.
-        """
         if len(messages) <= max_turns:
             return messages
 
